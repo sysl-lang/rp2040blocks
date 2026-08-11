@@ -1,0 +1,77 @@
+// What the divisor search claims, asserted on a desktop.
+//
+// **This is the only part of this package a host can run**, and that is the honest state rather than
+// a gap to be closed: everything else here ends at an address on a chip that is not present. What is
+// testable is the arithmetic that decides the bit rate, and it is worth testing precisely because it
+// is the one thing here that could be subtly wrong rather than obviously wrong — a driver at the
+// wrong clock works at short cable lengths and fails on somebody else's board.
+
+module sh.sysl.rp2040blocks.spi
+@no_alloc
+@tests
+
+// The pico-sdk's default, and the number every rate below is against.
+private const PERI: u32 = 125_000_000
+
+@test("the common display rate lands exactly, with no rounding to explain")
+divisors_hit_the_common_display_rate()
+    val d = divisors(PERI, 31_250_000)
+
+    assert_eq(d.0, 2u32)
+    assert_eq(d.1, 1u32)
+    assert_eq(rate(PERI, d.0, d.1), 31_250_000u32)
+
+@test("a reachable target is met from below rather than overshot")
+divisors_never_exceed_the_target_where_they_can_reach_it()
+    // A megahertz is well inside both dividers' range, so the answer must not be over it.
+    val d = divisors(PERI, 1_000_000)
+
+    assert(rate(PERI, d.0, d.1) <= 1_000_000)
+
+    // ...and must be the best available, so within one step of the target.
+    assert(rate(PERI, d.0, d.1) > 900_000)
+
+@test("the prescaler is even, which the block enforces by ignoring the low bit")
+the_prescaler_is_even_and_in_range()
+    // **The PL022 refuses an odd prescaler**, and refuses it by ignoring the low bit rather than by
+    // complaining — so a search that produced one would run at twice the intended rate.
+    for target in [100_000, 1_000_000, 4_000_000, 10_000_000, 31_250_000, 62_500_000]
+        val d = divisors(PERI, u32(target))
+
+        assert(d.0 % 2 == 0)
+        assert(d.0 >= 2)
+        assert(d.0 <= 254)
+        assert(d.1 <= 255)
+
+@test("an unreachable ask saturates at the slowest rate rather than wrapping")
+a_rate_below_what_the_block_can_reach_saturates_rather_than_wrapping()
+    // Both dividers at maximum is 125 MHz / (254 * 256), about 1.9 kHz. Asking for less than that
+    // cannot be honoured, and the answer must be the slowest available rather than something that
+    // has wrapped around.
+    val d = divisors(PERI, 500)
+
+    assert_eq(d.0, 254u32)
+    assert_eq(d.1, 255u32)
+
+@test("the ceiling is half the peripheral clock, because the prescaler cannot be one")
+the_fastest_ask_is_the_peripheral_clock_halved()
+    // `cpsdvsr` cannot be 1, so half of `clk_peri` is the ceiling however fast the ask.
+    val d = divisors(PERI, 125_000_000)
+
+    assert_eq(rate(PERI, d.0, d.1), 62_500_000u32)
+
+@test("'rate' and 'divisors' agree, so a caller can check what it actually got")
+rate_inverts_the_search()
+    for target in [200_000, 2_000_000, 20_000_000]
+        val d = divisors(PERI, u32(target))
+
+        assert_eq(rate(PERI, d.0, d.1), PERI / (d.0 * (1 + d.1)))
+
+@test("a slower peripheral clock is answered with less division, not a slower bus")
+a_slower_peripheral_clock_moves_the_divisors_and_not_the_rate()
+    // Half the input clock and the same target should need half the division.
+    val fast = divisors(PERI, 1_000_000)
+    val slow = divisors(PERI / 2, 1_000_000)
+
+    assert(rate(PERI / 2, slow.0, slow.1) <= 1_000_000)
+    assert(slow.0 * (1 + slow.1) < fast.0 * (1 + fast.1))

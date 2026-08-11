@@ -1,0 +1,166 @@
+// The SPI block — an Arm PL022, which is why nothing here is named the way Raspberry Pi names things.
+//
+// **The RP2040 licenses this peripheral rather than having designed it**, so the datasheet's SPI
+// chapter is mostly a pointer at Arm's and every register carries the PL022's `SSP` prefix. Read the
+// two together: the RP2040 datasheet says which pins and which reset bit, and the PL022 manual says
+// what `SSPCR0` means.
+//
+// **What this module does not do is clocks.** The divisors below are against `clk_peri`, and
+// bringing that up is the board's business — under the pico-sdk it is already running at the system
+// clock by the time any of this executes.
+
+module sh.sysl.rp2040blocks.spi
+@no_alloc
+
+import sh.sysl.rp2040.resets
+import sh.sysl.rp2040.spi0 as regs
+import sh.sysl.rp2040blocks.mmio.{clr, reg, set}
+
+// One of the chip's two SPI instances.
+//
+// **The register *offsets* are the same for both**, because both are the same PL022 — only the base
+// address and the reset bit differ, which is what this carries. `sh.sysl.rp2040` generates a full
+// module for each, and reaching for `spi1`'s offsets rather than `spi0`'s would be describing the
+// same layout twice.
+struct Block
+    base: u32
+    reset: u32
+end Block
+
+spi0() -> Block = Block(regs.BASE, resets.RESET_SPI0_MASK)
+spi1() -> Block = Block(0x40040000, resets.RESET_SPI1_MASK)
+
+private cr0(b: Block) -> u32 = b.base + regs.SSPCR0_OFFSET
+private cr1(b: Block) -> u32 = b.base + regs.SSPCR1_OFFSET
+private dr(b: Block) -> u32 = b.base + regs.SSPDR_OFFSET
+private sr(b: Block) -> u32 = b.base + regs.SSPSR_OFFSET
+private cpsr(b: Block) -> u32 = b.base + regs.SSPCPSR_OFFSET
+
+// ## The bit rate
+//
+// **`rate = clk_peri / (cpsdvsr * (1 + scr))`**, with `cpsdvsr` an even number from 2 to 254 and
+// `scr` anything from 0 to 255. Two knobs for one number, which is why choosing them is a search
+// rather than a division.
+
+// The actual rate a pair of divisors produces.
+rate(peri_hz: u32, cpsdvsr: u32, scr: u32) -> u32 = peri_hz / (cpsdvsr * (1 + scr))
+
+// The divisors for a target rate — `(cpsdvsr, scr)`.
+//
+// **It aims at the fastest rate not exceeding the target, and cannot always find one.** The
+// prescaler is coarse and the search takes the smallest one that leaves the fine divider able to
+// reach the target; below about 120 kHz off a 125 MHz peripheral clock both are at maximum and the
+// answer is simply the slowest the block can go, which is faster than asked for. A caller that cares
+// checks with `rate`.
+//
+// **This is the one function here a test can run**, which is why it is a function at all rather than
+// arithmetic inside `up`. Everything else in this module ends at an address.
+divisors(peri_hz: u32, target_hz: u32) -> (u32, u32)
+    var prescale: u32 = 2
+
+    // **The comparison is 64-bit and has to be.** `(prescale + 2) * 256 * target_hz` overflows 32
+    // bits for any target above about 60 kHz, and an overflow here silently picks a prescaler that
+    // is far too small — a bus running many times faster than asked for, which looks like noise on
+    // a scope and like a broken peripheral everywhere else.
+    while prescale < 254 && u64(peri_hz) >= u64(prescale + 2) * 256 * u64(target_hz)
+        prescale += 2
+
+    var postdiv: u32 = 256
+
+    while postdiv > 1 && peri_hz / (prescale * (postdiv - 1)) <= target_hz
+        postdiv -= 1
+
+    (prescale, postdiv - 1)
+end divisors
+
+// ## Bringing it up
+
+// Reset the block, configure it, and enable it — eight bits a frame, master, at about `hz`.
+//
+// **The reset cycle is not optional and is the step with no equivalent on a smaller chip.** Every
+// register below reads and writes perfectly while the block is held in reset, and none of it does
+// anything — so a driver that skips this configures nothing and reports no error.
+//
+// **`SSE` is set last and on its own** because the PL022 wants configuring while disabled. Writing
+// the enable in the same store as the frame format is how a block ends up half-configured.
+//
+// `cpol` and `cpha` are SPI's two clock choices, spelled `SPO` and `SPH` here. The default is mode 0
+// — clock idles low, data sampled on the leading edge — which is what most displays and most sensors
+// want.
+up(b: Block, peri_hz: u32, hz: u32, cpol: bool = false, cpha: bool = false)
+    *set(resets.BASE + resets.RESET_OFFSET) = b.reset
+    *clr(resets.BASE + resets.RESET_OFFSET) = b.reset
+
+    while *reg(resets.BASE + resets.RESET_DONE_OFFSET) & b.reset == 0 do ()
+
+    val d = divisors(peri_hz, hz)
+
+    *reg(cr1(b)) = 0
+    *reg(cpsr(b)) = d.0
+
+    // `DSS = 7` is eight bits, counted from zero. `FRF = 0` is Motorola SPI rather than either of the
+    // two other framings the PL022 speaks, and is left implicit by being zero.
+    var format = (d.1 << regs.SSPCR0_SCR_SHIFT) | 7u32
+
+    if cpol then format |= regs.SSPCR0_SPO_MASK
+    if cpha then format |= regs.SSPCR0_SPH_MASK
+
+    *reg(cr0(b)) = format
+
+    *reg(cr1(b)) = regs.SSPCR1_SSE_MASK
+end up
+
+// ## Moving bytes
+
+// Push bytes and throw away everything that comes back.
+//
+// **The reads are not optional even though nothing is listening.** Every frame clocked out clocks one
+// in, and a receive FIFO nobody empties overflows — after which the block keeps running while its
+// status bits stop meaning what this loop reads them to mean. So the loop is balanced: it pushes
+// while there is room and pops while there is anything there, and finishes when as many frames have
+// come back as went out.
+send(b: Block, data: []u8)
+    var tx: usize = 0
+    var rx: usize = 0
+    var sink: u32 = 0
+
+    while rx < data.len
+        if tx < data.len && *reg(sr(b)) & regs.SSPSR_TNF_MASK != 0
+            *reg(dr(b)) = u32(data[tx])
+            tx += 1
+
+        if *reg(sr(b)) & regs.SSPSR_RNE_MASK != 0
+            sink = *reg(dr(b))
+            rx += 1
+end send
+
+// Send bytes and keep what comes back, which is what a device with something to say needs. The two
+// slices must be the same length; the shorter one decides.
+exchange(b: Block, out: []u8, into: []u8)
+    val n = if out.len < into.len then out.len else into.len
+    var tx: usize = 0
+    var rx: usize = 0
+
+    while rx < n
+        if tx < n && *reg(sr(b)) & regs.SSPSR_TNF_MASK != 0
+            *reg(dr(b)) = u32(out[tx])
+            tx += 1
+
+        if *reg(sr(b)) & regs.SSPSR_RNE_MASK != 0
+            into[rx] = u8(*reg(dr(b)) & 0xff)
+            rx += 1
+end exchange
+
+// Wait until the last bit is off the wire.
+//
+// **This is what makes a data/command pin safe to move.** The FIFO being empty says the block has
+// *accepted* every byte, not that it has *sent* them — so a display driver that lowers `DC` on an
+// empty FIFO turns its last parameter into a command, which the panel obeys. `BSY` is the bit that
+// answers the question actually being asked, and it is the difference between a driver that works
+// and one that works at low clock rates.
+drain(b: Block) =
+    while *reg(sr(b)) & regs.SSPSR_BSY_MASK != 0 do ()
+
+// Whether the block is enabled — the one piece of state worth reading back, because everything else
+// here is write-only in practice.
+enabled(b: Block) -> bool = *reg(cr1(b)) & regs.SSPCR1_SSE_MASK != 0

@@ -1,0 +1,138 @@
+// The GPIO block — pin functions, direction, pulls, and the levels themselves.
+//
+// **A pin on this chip is three registers in two different peripherals**, and that is the whole
+// reason this module exists. `IO_BANK0` decides which peripheral the pin belongs to, `PADS_BANK0`
+// decides what the physical pad does — drive, input buffer, pulls, slew — and `SIO` is where the
+// level lives once the pin belongs to the processor. Nothing in the register map draws those
+// together, because a register map describes registers.
+
+module sh.sysl.rp2040blocks.gpio
+@no_alloc
+
+import sh.sysl.rp2040.io_bank0 as io
+import sh.sysl.rp2040.pads_bank0 as pads
+import sh.sysl.rp2040.sio
+import sh.sysl.rp2040blocks.mmio.{clr, reg, set}
+
+// ## What a pin can be
+//
+// **The function numbers are the same on every pin, which is what makes these constants honest.**
+// `sh.sysl.rp2040` generates a named constant per pin per function — `GPIO2_CTRL_FUNCSEL_SPI0_SCLK`,
+// `GPIO3_CTRL_FUNCSEL_SPI0_TX` — because that is what the SVD describes, and all of them for a given
+// function are the same number. So a caller that knows it wants SPI can say so once instead of
+// looking up which SPI signal this particular pin carries.
+//
+// **`CLOCK` exists only on GPIO 20 to 25**, which are the pins wired to the clock generator;
+// selecting it elsewhere selects nothing. Every other function below is on every pin.
+const SPI: u32   = 1
+const UART: u32  = 2
+const I2C: u32   = 3
+const PWM: u32   = 4
+const SIO: u32   = 5
+const PIO0: u32  = 6
+const PIO1: u32  = 7
+const CLOCK: u32 = 8
+const USB: u32   = 9
+
+// **`NONE` is 31 rather than 0.** Zero is a real function on the pins that have one — JTAG, on GPIO 0
+// to 3 — so a pin "switched off" by writing zero is a pin quietly handed to the debug port.
+const NONE: u32 = 31
+
+// ## Reaching one pin's registers
+//
+// The three blocks lay their per-pin registers out differently, and both strides are load bearing.
+
+// A pin's pad control — drive strength, pulls, input enable, output disable. **Four bytes apart**,
+// the first at `GPIO0_OFFSET` because a voltage-select register sits in front of them.
+pad(pin: u32) -> u32 = pads.BASE + pads.GPIO0_OFFSET + pin * 4
+
+// A pin's function select. **Eight bytes apart**, because each pin has a status word in front of its
+// control word.
+ctrl(pin: u32) -> u32 = io.BASE + io.GPIO0_CTRL_OFFSET + pin * 8
+
+// ## Choosing a function
+
+// Hand a pin to a peripheral, and make the pad carry the signal.
+//
+// **The pad half is what gets forgotten**, and the symptom is a peripheral that appears configured
+// and drives nothing. `OD` is "output disable", so clearing it is what enables the driver — the
+// sense reads backwards and is the datasheet's. `IE` enables the input buffer, which an output does
+// not strictly need; it is set anyway so that a pin can be read back, and because a peripheral that
+// receives as well as sends needs it and finding out which do is not worth the saving.
+select(pin: u32, func: u32)
+    *clr(pad(pin)) = pads.GPIO0_OD_MASK
+    *set(pad(pin)) = pads.GPIO0_IE_MASK
+    *reg(ctrl(pin)) = func
+end select
+
+// ## Direction, once the pin is the processor's
+//
+// **Direction is `SIO`'s and not the pad's**, which is the distinction the `OD` bit above invites you
+// to get wrong. `OD` says whether the pad may drive at all; `OE` says whether this particular pin is
+// currently an output. A pin needs both, and only one of them is something a program changes at run
+// time.
+
+// An output, at the level it already had.
+output(pin: u32)
+    select(pin, SIO)
+    *reg(sio.BASE + sio.GPIO_OE_SET_OFFSET) = 1u32 << pin
+
+// An input, with whatever pulls are set.
+input(pin: u32)
+    select(pin, SIO)
+    *reg(sio.BASE + sio.GPIO_OE_CLR_OFFSET) = 1u32 << pin
+
+// ## Pulls
+//
+// **Both bits raised is a legal state and is not what anybody means.** The pad ties the pin to both
+// rails through equal resistors, which is a divider at half the supply — a floating input reading
+// noise, on a pin that looks configured. So each of these clears the other bit rather than only
+// setting its own.
+
+pull_up(pin: u32)
+    *clr(pad(pin)) = pads.GPIO0_PDE_MASK
+    *set(pad(pin)) = pads.GPIO0_PUE_MASK
+
+pull_down(pin: u32)
+    *clr(pad(pin)) = pads.GPIO0_PUE_MASK
+    *set(pad(pin)) = pads.GPIO0_PDE_MASK
+
+float(pin: u32) = *clr(pad(pin)) = pads.GPIO0_PUE_MASK | pads.GPIO0_PDE_MASK
+
+// An input held high until something pulls it down, which is what a button to ground needs.
+input_pullup(pin: u32)
+    input(pin)
+    pull_up(pin)
+
+// An input held low until something pulls it up.
+input_pulldown(pin: u32)
+    input(pin)
+    pull_down(pin)
+
+// ## Levels
+//
+// **Set, clear and toggle are separate registers rather than a read-modify-write of one**, and the
+// reason is the same as it is for the atomic aliases: two cores share this block, so a
+// read-modify-write of `GPIO_OUT` from one of them drops whatever the other changed in between.
+// Here it is not an alias but the block's own design — `SIO` is the one peripheral that is *not*
+// aliased, because it is per-core and single-cycle by construction.
+
+high(pin: u32) = *reg(sio.BASE + sio.GPIO_OUT_SET_OFFSET) = 1u32 << pin
+low(pin: u32) = *reg(sio.BASE + sio.GPIO_OUT_CLR_OFFSET) = 1u32 << pin
+toggle(pin: u32) = *reg(sio.BASE + sio.GPIO_OUT_XOR_OFFSET) = 1u32 << pin
+
+write(pin: u32, on: bool) = if on then high(pin) else low(pin)
+
+// **What the pin is, not what it was told to be.** This reads the input register, so an output that
+// something else is holding low reads low — which is the answer worth having.
+read(pin: u32) -> bool = (*reg(sio.BASE + sio.GPIO_IN_OFFSET) >> pin) & 1u32 == 1
+
+// ## Whole banks at once
+//
+// One store for as many pins as the mask names, which matters for anything driving a parallel bus.
+// The mask is by bit position, so pin 5 is `1 << 5`.
+
+high_mask(mask: u32) = *reg(sio.BASE + sio.GPIO_OUT_SET_OFFSET) = mask
+low_mask(mask: u32) = *reg(sio.BASE + sio.GPIO_OUT_CLR_OFFSET) = mask
+toggle_mask(mask: u32) = *reg(sio.BASE + sio.GPIO_OUT_XOR_OFFSET) = mask
+read_all() -> u32 = *reg(sio.BASE + sio.GPIO_IN_OFFSET)

@@ -1,0 +1,44 @@
+// The RP2040's peripheral blocks — the smallest useful thing on top of the register map.
+//
+// **`sh.sysl.rp2040` is generated and this is not, and that is the whole reason the two are separate
+// packages.** Every `.sysl` file in `rp2040` comes out of Raspberry Pi's own `RP2040.svd` by way of
+// `sysl-lang/svd`, so a hand edit there is lost the next time the chip is regenerated. What that
+// buys is a package you can regenerate and diff to nothing; what it costs is that there is nowhere
+// in it for a line of code to live. This is that nowhere.
+//
+// The split is the ordinary one — a generated register description underneath, hand-written bring-up
+// on top — and the names say which is which: `rp2040` describes registers, `rp2040blocks` drives the
+// blocks they belong to. "Block" is the datasheet's word and the SDK's.
+//
+// This is the block a *consumer* writes to reach this package:
+//
+//     dependencies {
+//       rp2040blocks { git = "github.com/sysl-lang/rp2040blocks", version = "0.1.0" }
+//     }
+//
+// The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
+// tag `v0.1.0` on this repository.
+
+package {
+  name    = "rp2040blocks"
+  version = "0.1.0"
+}
+
+// **The one dependency is the register map**, which is constants and nothing else — no code, no C,
+// no capability of its own. Depending on it rather than transcribing base addresses is what keeps
+// this readable against the datasheet, and what makes a chip erratum somebody else's problem.
+dependencies {
+  rp2040 { git = "github.com/sysl-lang/rp2040", version = "0.1.0" }
+}
+
+// **There is no `requires` block, and every module declares `@no_alloc`.**
+//
+// A capability clause is a claim about what a library *does*, and what this one does is arithmetic on
+// addresses and stores through raw pointers. It opens no file, reads no clock, asks an operating
+// system for nothing, and never reaches a heap — which it had better not, on a chip with 264 KB and
+// no operating system to have one.
+
+// **It carries no `@link` directive**, because there is nothing to link: the whole of it is sysl.
+// That also means it needs no C toolchain configuration, no SDK headers and no CMake — unlike
+// `sh.sysl.pico`, which is the SDK's surface and cannot compile without it. A program can use this
+// package and `sysl build` alone.

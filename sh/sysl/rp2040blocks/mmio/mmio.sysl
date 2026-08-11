@@ -1,0 +1,44 @@
+// Reaching a register at all — the one thing every other module here rests on.
+
+module sh.sysl.rp2040blocks.mmio
+@no_alloc
+
+// A register, as a place the compiler may not reason about.
+//
+// **The `volatile` is the whole of what this function adds over arithmetic.** An optimizer is
+// entitled to assume that reading the same storage twice yields the same value, that a store nobody
+// reads is a store nobody needs, and that two accesses in a row may be one wider access. All three
+// are false at a device: `while *reg(STATUS) & BUSY != 0 do ()` is a loop that reads until the
+// hardware changes it, and a compiler that hoisted the read out would spin forever on the first
+// value it saw.
+//
+// `ptr_cast` gets you the address. This gets you a *correct* driver.
+reg(addr: u32) -> *volatile u32 = ptr_cast(usize(addr))
+
+// ## The atomic aliases
+//
+// **Every peripheral register on this chip has three more addresses above it**, at fixed offsets
+// from the block's base, and writing to one of them is a read-modify-write the hardware does
+// indivisibly:
+//
+// | alias | offset | writing a mask |
+// |---|---|---|
+// | XOR | `0x1000` | flips those bits |
+// | SET | `0x2000` | raises those bits |
+// | CLR | `0x3000` | lowers those bits |
+//
+// **This is not a convenience.** A read-modify-write done in software races the other core, and the
+// registers most worth changing one bit of — `RESETS`, the pad controls, the GPIO output — are
+// exactly the ones both cores reach. It also costs one store rather than three instructions, which
+// is why it is worth reaching for even in code that will never run on the second core.
+//
+// The offsets go on the *register's* address, not the block's: `mmio.set(resets.BASE +
+// resets.RESET_OFFSET)` is the reset register's set alias.
+const XOR: u32 = 0x1000
+const SET: u32 = 0x2000
+const CLR: u32 = 0x3000
+
+// The three aliases of a register whose ordinary address is `addr`.
+xor(addr: u32) -> *volatile u32 = reg(addr + XOR)
+set(addr: u32) -> *volatile u32 = reg(addr + SET)
+clr(addr: u32) -> *volatile u32 = reg(addr + CLR)
