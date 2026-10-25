@@ -13,22 +13,25 @@
 // This is the block a *consumer* writes to reach this package:
 //
 //     dependencies {
-//       rp2040blocks { git = "github.com/sysl-lang/rp2040blocks", version = "0.1.0" }
+//       rp2040blocks { git = "github.com/sysl-lang/rp2040blocks", version = "0.1.1" }
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
-// tag `v0.1.0` on this repository.
+// tag `v0.1.1` on this repository.
 
 package {
   name    = "rp2040blocks"
-  version = "0.1.0"
+  version = "0.1.1"
+
+  // The compiler this was written against: it builds without warnings on 0.6.0.
+  sysl = "0.6.0"
 }
 
 // **The one dependency is the register map**, which is constants and nothing else — no code, no C,
 // no capability of its own. Depending on it rather than transcribing base addresses is what keeps
 // this readable against the datasheet, and what makes a chip erratum somebody else's problem.
 dependencies {
-  rp2040 { git = "github.com/sysl-lang/rp2040", version = "0.1.0" }
+  rp2040 { git = "github.com/sysl-lang/rp2040", version = "0.1.1" }
 }
 
 // **There is no `requires` block, and every module declares `@no_alloc`.**

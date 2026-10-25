@@ -3,6 +3,8 @@
 module sh.sysl.rp2040blocks.mmio
 @no_alloc
 
+import sysl.raw.ptr_cast
+
 // A register, as a place the compiler may not reason about.
 //
 // **The `volatile` is the whole of what this function adds over arithmetic.** An optimizer is
