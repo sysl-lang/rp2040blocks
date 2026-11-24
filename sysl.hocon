@@ -13,7 +13,7 @@
 // This is the block a *consumer* writes to reach this package:
 //
 //     dependencies {
-//       rp2040blocks { git = "github.com/sysl-lang/rp2040blocks", version = "0.1.1" }
+//       rp2040blocks { git = "github.com/sysl-lang/rp2040blocks", version = "0.1.2" }
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
@@ -21,7 +21,7 @@
 
 package {
   name    = "rp2040blocks"
-  version = "0.1.1"
+  version = "0.1.2"
 
   // The compiler this was written against: it builds without warnings on 0.6.0.
   sysl = "0.6.0"
@@ -31,7 +31,7 @@ package {
 // no capability of its own. Depending on it rather than transcribing base addresses is what keeps
 // this readable against the datasheet, and what makes a chip erratum somebody else's problem.
 dependencies {
-  rp2040 { git = "github.com/sysl-lang/rp2040", version = "0.1.1" }
+  rp2040 { git = "github.com/sysl-lang/rp2040", version = "0.1.2" }
 }
 
 // **There is no `requires` block, and every module declares `@no_alloc`.**
